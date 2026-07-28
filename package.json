@@ -1,0 +1,23 @@
+{
+  "name": "one-brain",
+  "version": "1.0.0",
+  "description": "JibuFlow — AI sales assistant backend",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "google-auth-library": "^10.9.1",
+    "jsonwebtoken": "^9.0.3",
+    "openai": "^6.48.0",
+    "pg": "^8.22.0"
+  }
+}
