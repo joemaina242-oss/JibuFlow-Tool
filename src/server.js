@@ -331,37 +331,71 @@ app.get("/api/tiktok/authorize", requireAuth, (req, res) => {
   res.json({ url });
 });
 app.get("/api/tiktok/callback", async (req, res) => {
-  const home = (verifyState(req.query.state) || {}).origin || APP_BASE;
-  const fail = (m) => res.redirect(home + "/?connected=0&error=" + encodeURIComponent(m));
+  const st = verifyState(req.query.state) || {};
+  const home = st.origin || APP_BASE;
+  const fail = (m) => {
+    console.log("🔴 TT callback fail:", m, "| query:", JSON.stringify(req.query));
+    return res.redirect(home + "/?connected=0&error=" + encodeURIComponent(m));
+  };
   try {
-    const st = verifyState(req.query.state);
-    if (!st || !st.accountId) return fail("bad state");
+    if (!st.accountId) return fail("bad state");
     const code = req.query.code;
-    if (!code) return fail(req.query.error_description || "no code");
-    const tokRes = await fetch("https://open.tiktokapis.com/v2/oauth/token/", {
-      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ client_key: TK.key, client_secret: TK.secret, code, grant_type: "authorization_code", redirect_uri: TK.redirect }).toString(),
+    if (!code) return fail(req.query.error_description || req.query.error || "no code");
+
+    // trim() here is the fix: a stray space copied into the secret/key/redirect
+    // in the Render env UI would otherwise break the exchange silently.
+    const clientKey    = String(TK.key || "").trim();
+    const clientSecret = String(TK.secret || "").trim();
+    const redirectUri  = String(TK.redirect || "").trim();
+    const tokenUrl     = "https://open.tiktokapis.com/v2/oauth/token/";
+
+    const tokRes = await fetch(tokenUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_key: clientKey,
+        client_secret: clientSecret,
+        code: String(code),
+        grant_type: "authorization_code",
+        redirect_uri: redirectUri,
+      }).toString(),
     });
-    const tok = await tokRes.json();
-    if (!tok.access_token) return fail(tok.error_description || tok.error || "token exchange failed");
+    const tokText = await tokRes.text();
+    let tok = {};
+    try { tok = JSON.parse(tokText); } catch (e) { tok = {}; }
+    console.log("🔵 TT token exchange HTTP", tokRes.status, "| body:", tokText.slice(0, 400));
+
+    if (!tok.access_token) {
+      return fail(tok.error_description || tok.error || ("token exchange failed (HTTP " + tokRes.status + ")"));
+    }
+
     let handle = "";
     try {
-      const me = await fetch("https://open.tiktokapis.com/v2/user/info/?fields=open_id,username,display_name", { headers: { Authorization: "Bearer " + tok.access_token } });
+      const me = await fetch("https://open.tiktokapis.com/v2/user/info/?fields=open_id,username,display_name", {
+        headers: { Authorization: "Bearer " + tok.access_token },
+      });
       const mj = await me.json();
       handle = (mj.data && mj.data.user && (mj.data.user.username || mj.data.user.display_name)) || "";
-    } catch {}
+    } catch (e) { console.log("⚠️ TT user/info failed:", e.message); }
+
     const openId = tok.open_id || crypto.randomBytes(8).toString("hex");
     const scopes = String(tok.scope || "").split(/[\s,]+/).filter(Boolean);
     const expiresAt = tok.expires_in ? new Date(Date.now() + tok.expires_in * 1000) : null;
+
     await pool.query(
       `INSERT INTO tiktok_connections (account_id,tiktok_open_id,handle,access_token_enc,refresh_token_enc,token_expires_at,scopes,dm_available)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
        ON CONFLICT (tiktok_open_id) DO UPDATE SET handle=EXCLUDED.handle, access_token_enc=EXCLUDED.access_token_enc,
-         refresh_token_enc=EXCLUDED.refresh_token_enc, token_expires_at=EXCLUDED.token_expires_at, scopes=EXCLUDED.scopes, revoked_at=NULL, connected_at=NOW()`,
+       refresh_token_enc=EXCLUDED.refresh_token_enc, token_expires_at=EXCLUDED.token_expires_at, scopes=EXCLUDED.scopes,
+       revoked_at=NULL, connected_at=NOW()`,
       [st.accountId, openId, handle, encrypt(tok.access_token), tok.refresh_token ? encrypt(tok.refresh_token) : null, expiresAt, scopes, false]
     );
+    console.log("✅ TT connected for account", st.accountId, "handle", handle);
     res.redirect(home + "/?connected=1&handle=" + encodeURIComponent(handle || "@connected"));
-  } catch (e) { console.error("callback", e); fail("server error"); }
+  } catch (e) {
+    console.error("❌ TT callback threw:", e && e.message, e && e.stack);
+    return fail("server error");
+  }
 });
 app.get("/api/tiktok/status", requireAuth, async (req, res) => {
   const r = await pool.query("SELECT handle,scopes,dm_available,token_expires_at,revoked_at FROM tiktok_connections WHERE account_id=$1 AND revoked_at IS NULL LIMIT 1", [req.account.id]);
